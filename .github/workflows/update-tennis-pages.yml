@@ -5,7 +5,7 @@ on:
   schedule:
     # GitHub schedule 預設使用 UTC。
     # 04:10 UTC = 台灣 12:10。避免排在整點，降低延遲機率。
-    - cron: "10 4 * * *"
+    - cron: "50 23 * * *"
 
 permissions:
   contents: read
