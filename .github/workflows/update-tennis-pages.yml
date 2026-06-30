@@ -3,7 +3,7 @@ name: Update Tennis Matches Page
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "30 18 * * *"  # 台灣時間 02:30
 
 permissions:
   contents: read
