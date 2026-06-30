@@ -3,16 +3,8 @@ name: Update Tennis Matches Page
 on:
   workflow_dispatch:
   schedule:
-    # 測試邏輯：
-    # 每小時的 02 / 07 / 12 / 17 / 22 / 27 / 32 / 37 / 42 / 47 / 52 / 57 分觸發
-    # 等於每 5 分鐘嘗試一次，但以 04:07 作為每日重置點
-    #
-    # 台灣 04:07 後：
-    # 若 today_matches.json 的 generated_at_taiwan 早於今日 04:07 → 執行更新
-    # 若 generated_at_taiwan 晚於或等於今日 04:07 → 直接跳過
-    #
-    # 隔天 04:07 後會重新開始新一輪
-    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
+    # 不指定時間，只使用剛剛已證明可觸發的每 5 分鐘模式
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: read
@@ -23,6 +15,12 @@ concurrency:
   group: "pages"
   cancel-in-progress: false
 
+env:
+  # 這個是 gate 版本標記。
+  # 目前 2:08 產出的 JSON 沒有這個 marker，所以會被視為「今天尚未完成」。
+  # 如果你之後同一天想再重測一次，只要把 v1 改成 v2，再 commit。
+  GATE_MARKER: "daily-gate-v1"
+
 jobs:
   build-and-deploy:
     environment:
@@ -31,46 +29,37 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check daily 04:07 gate
+      - name: Check Taiwan daily gate
         id: gate
         env:
           EVENT_NAME: ${{ github.event_name }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
+          GATE_MARKER: ${{ env.GATE_MARKER }}
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import json
           import os
+          import re
           import urllib.request
-          from datetime import datetime, time, timedelta
+          from datetime import datetime
           from zoneinfo import ZoneInfo
 
           def out(key, value):
-              value = str(value).replace("\n", " ")[:500]
+              value = str(value).replace("\n", " ")[:1000]
               print(f"{key}={value}")
-
-          event_name = os.environ.get("EVENT_NAME", "")
-
-          # 手動執行永遠放行，方便你人工測試
-          if event_name == "workflow_dispatch":
-              out("should_run", "true")
-              out("reason", "Manual run: bypass gate.")
-              raise SystemExit
 
           tz = ZoneInfo("Asia/Taipei")
           now_tw = datetime.now(tz)
+          today_tw = now_tw.date().isoformat()
+          expected_marker = os.environ.get("GATE_MARKER", "")
 
-          # 每日重置時間：台灣 04:07
-          reset_t = time(4, 7)
-
-          if now_tw.time() >= reset_t:
-              cycle_start = datetime.combine(now_tw.date(), reset_t, tzinfo=tz)
-          else:
-              cycle_start = datetime.combine(
-                  now_tw.date() - timedelta(days=1),
-                  reset_t,
-                  tzinfo=tz
-              )
+          # 手動執行：永遠放行
+          # 注意：如果你現在要驗證 schedule，請不要按 Run workflow，等 Scheduled 自己進來。
+          if os.environ.get("EVENT_NAME") == "workflow_dispatch":
+              out("should_run", "true")
+              out("reason", "Manual run: bypass gate.")
+              raise SystemExit
 
           url = (
               "https://levinlive1984-design.github.io/"
@@ -83,48 +72,72 @@ jobs:
                   data = json.loads(r.read().decode("utf-8"))
 
               generated_tw = str(data.get("generated_at_taiwan", "")).strip()
+              generated_utc = str(data.get("generated_at_utc", "")).strip()
+              existing_marker = str(data.get("gate_marker", "")).strip()
 
           except Exception as e:
               out("should_run", "true")
               out("reason", f"Cannot read existing JSON, run update: {e}")
               raise SystemExit
 
-          try:
-              # 支援：
-              # 2026-07-01 02:08:00
-              # 2026/07/01 02:08:00
-              # 2026-07-01T02:08:00
-              generated_dt = datetime.fromisoformat(
-                  generated_tw.replace("/", "-")
-              )
+          generated_date_tw = None
 
-              if generated_dt.tzinfo is None:
-                  generated_dt = generated_dt.replace(tzinfo=tz)
-              else:
-                  generated_dt = generated_dt.astimezone(tz)
+          # 優先用 generated_at_taiwan 判斷台灣日期
+          if generated_tw:
+              first10 = generated_tw[:10].replace("/", "-")
+              if re.match(r"^\d{4}-\d{2}-\d{2}$", first10):
+                  generated_date_tw = first10
 
-          except Exception as e:
-              out("should_run", "true")
-              out("reason", f"Cannot parse generated_at_taiwan={generated_tw}, run update: {e}")
-              raise SystemExit
+          # 若 generated_at_taiwan 格式不正常，才退回 generated_at_utc
+          if generated_date_tw is None and generated_utc:
+              try:
+                  utc_text = generated_utc.replace("Z", "+00:00").replace("/", "-")
+                  dt_utc = datetime.fromisoformat(utc_text)
 
-          if generated_dt >= cycle_start:
+                  if dt_utc.tzinfo is None:
+                      dt_utc = dt_utc.replace(tzinfo=ZoneInfo("UTC"))
+
+                  generated_date_tw = dt_utc.astimezone(tz).date().isoformat()
+              except Exception:
+                  generated_date_tw = None
+
+          same_day = generated_date_tw == today_tw
+          same_marker = existing_marker == expected_marker
+
+          if same_day and same_marker:
               out("should_run", "false")
               out(
                   "reason",
-                  f"Already updated this cycle. generated_at_taiwan={generated_tw}, cycle_start={cycle_start.isoformat()}"
+                  f"Already updated today with valid marker. "
+                  f"generated_at_taiwan={generated_tw}, "
+                  f"generated_date_tw={generated_date_tw}, "
+                  f"gate_marker={existing_marker}, "
+                  f"today_tw={today_tw}, "
+                  f"now_taiwan={now_tw.isoformat()}"
               )
           else:
               out("should_run", "true")
               out(
                   "reason",
-                  f"Need update. generated_at_taiwan={generated_tw}, cycle_start={cycle_start.isoformat()}, now_taiwan={now_tw.isoformat()}"
+                  f"Need update. "
+                  f"generated_at_taiwan={generated_tw}, "
+                  f"generated_date_tw={generated_date_tw}, "
+                  f"existing_marker={existing_marker}, "
+                  f"expected_marker={expected_marker}, "
+                  f"today_tw={today_tw}, "
+                  f"now_taiwan={now_tw.isoformat()}"
               )
           PY
 
-      - name: Stop because this cycle is already updated
+      - name: Show gate decision
+        run: |
+          echo "should_run=${{ steps.gate.outputs.should_run }}"
+          echo "reason=${{ steps.gate.outputs.reason }}"
+
+      - name: Stop because today is already updated
         if: steps.gate.outputs.should_run != 'true'
         run: |
+          echo "Skip real update."
           echo "${{ steps.gate.outputs.reason }}"
 
       - name: Checkout repository
@@ -144,6 +157,44 @@ jobs:
       - name: Generate tennis matches site
         if: steps.gate.outputs.should_run == 'true'
         run: python tennis_filter.py
+
+      - name: Stamp gate marker into today_matches.json
+        if: steps.gate.outputs.should_run == 'true'
+        env:
+          GATE_MARKER: ${{ env.GATE_MARKER }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          from pathlib import Path
+
+          path = Path("docs/today_matches.json")
+
+          if not path.exists():
+              raise FileNotFoundError("docs/today_matches.json was not generated.")
+
+          data = json.loads(path.read_text(encoding="utf-8"))
+
+          now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
+          now_utc = datetime.now(ZoneInfo("UTC"))
+
+          data["gate_marker"] = os.environ.get("GATE_MARKER", "")
+          data["gate_marked_at_taiwan"] = now_tw.strftime("%Y-%m-%d %H:%M:%S")
+          data["gate_marked_at_utc"] = now_utc.isoformat()
+          data["gate_run_id"] = os.environ.get("RUN_ID", "")
+          data["gate_run_attempt"] = os.environ.get("RUN_ATTEMPT", "")
+
+          path.write_text(
+              json.dumps(data, ensure_ascii=False, indent=2),
+              encoding="utf-8"
+          )
+
+          print(f"Stamped gate_marker={data['gate_marker']} into {path}")
+          PY
 
       - name: Setup Pages
         if: steps.gate.outputs.should_run == 'true'
