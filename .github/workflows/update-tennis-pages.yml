@@ -8,7 +8,7 @@ on:
     - cron: "*/5 * * * *"
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -54,8 +54,8 @@ jobs:
           today_tw = now_tw.date().isoformat()
           expected_marker = os.environ.get("GATE_MARKER", "")
 
-          # 手動執行永遠放行，方便你臨時更新。
-          # 如果你要測 schedule，請不要按 Run workflow。
+          # 手動執行永遠放行，方便臨時更新。
+          # 如果要測 schedule，請不要按 Run workflow。
           if os.environ.get("EVENT_NAME") == "workflow_dispatch":
               out("should_run", "true")
               out("reason", "Manual run: bypass gate.")
@@ -83,10 +83,6 @@ jobs:
           generated_date_tw = None
 
           # 優先使用 generated_at_taiwan 判斷台灣日期
-          # 支援：
-          # 2026-07-01 02:08:00
-          # 2026/07/01 02:08:00
-          # 2026-07-01T02:08:00
           if generated_tw:
               first10 = generated_tw[:10].replace("/", "-")
               if re.match(r"^\d{4}-\d{2}-\d{2}$", first10):
@@ -199,6 +195,21 @@ jobs:
 
           print(f"Stamped gate_marker={data['gate_marker']} into {path}")
           PY
+
+      - name: Commit generated docs back to repository
+        if: steps.gate.outputs.should_run == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add docs/today_matches.json docs/today_matches.txt docs/index.html
+
+          if git diff --cached --quiet; then
+            echo "No docs changes to commit."
+          else
+            git commit -m "Update tennis matches data [skip ci]"
+            git push
+          fi
 
       - name: Setup Pages
         if: steps.gate.outputs.should_run == 'true'
