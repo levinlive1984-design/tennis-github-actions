@@ -3,8 +3,8 @@ name: Update Tennis Matches Page
 on:
   workflow_dispatch:
   schedule:
-    # GitHub Actions 排程不穩，所以只用最單純、最容易被觸發的每 5 分鐘模式。
-    # 真正是否執行更新，由下方 Taiwan daily gate 控制。
+    # GitHub Actions 排程不穩，所以保留每 5 分鐘檢查一次。
+    # 真正是否執行更新，由下方 Taiwan daily gate 控制：每天台灣時間 12:00 後才允許更新一次。
     - cron: "*/5 * * * *"
 
 permissions:
@@ -59,6 +59,19 @@ jobs:
           if os.environ.get("EVENT_NAME") == "workflow_dispatch":
               out("should_run", "true")
               out("reason", "Manual run: bypass gate.")
+              raise SystemExit
+
+          # 排程執行時，未到台灣時間中午 12:00 一律不更新。
+          # 保留每 5 分鐘 cron，是為了避免 GitHub Actions 單點排程漏跑；
+          # 到 12:00 後，第一個成功觸發的 schedule 才會真正更新。
+          if now_tw.hour < 12:
+              out("should_run", "false")
+              out(
+                  "reason",
+                  f"Waiting until Taiwan 12:00. "
+                  f"today_tw={today_tw}, "
+                  f"now_taiwan={now_tw.isoformat()}"
+              )
               raise SystemExit
 
           url = (
